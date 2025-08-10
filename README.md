@@ -37,7 +37,7 @@ Built with **React**, **WebSockets**, and **Python** to ensure messages remain p
 
 ## 📂 Project Structure
 
-├── rsa-chat-frontend
+├── client
 
 │ ├── src/
 
