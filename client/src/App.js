@@ -23,6 +23,56 @@ const ChatApp = () => {
   const messagesEndRef = useRef(null);
   const friendPublicKeys = useRef({});
 
+  // Load saved data from memory on component mount
+  useEffect(() => {
+    const savedData = {
+      serverUrl: window.chatAppData?.serverUrl || 'ws://localhost:8765',
+      currentUser: window.chatAppData?.currentUser || '',
+      publicKey: window.chatAppData?.publicKey || '',
+      privateKeyPem: window.chatAppData?.privateKeyPem || '',
+      friends: window.chatAppData?.friends || [],
+      messages: window.chatAppData?.messages || {},
+      friendPublicKeys: window.chatAppData?.friendPublicKeys || {}
+    };
+
+    setServerUrl(savedData.serverUrl);
+    setCurrentUser(savedData.currentUser);
+    setPublicKey(savedData.publicKey);
+    setPrivateKeyPem(savedData.privateKeyPem);
+    setFriends(savedData.friends);
+    setMessages(savedData.messages);
+    friendPublicKeys.current = savedData.friendPublicKeys;
+
+    // Auto-connect if we have saved credentials
+    if (savedData.currentUser && savedData.publicKey) {
+      setLoggedIn(true);
+      // Auto-connect to server if we were previously logged in
+      setTimeout(() => {
+        if (!connected) {
+          connectToServer();
+        }
+      }, 500);
+    } else {
+      // Generate new keys if we don't have them
+      generateRSAKeys();
+    }
+  }, []);
+
+  // Save data to memory whenever important state changes
+  useEffect(() => {
+    if (!window.chatAppData) window.chatAppData = {};
+    
+    window.chatAppData = {
+      serverUrl,
+      currentUser,
+      publicKey,
+      privateKeyPem,
+      friends,
+      messages,
+      friendPublicKeys: friendPublicKeys.current
+    };
+  }, [serverUrl, currentUser, publicKey, privateKeyPem, friends, messages]);
+
   // Generate RSA keys on mount
   const generateRSAKeys = useCallback(async () => {
     try {
@@ -49,10 +99,6 @@ const ChatApp = () => {
       showNotification('Failed to generate RSA keys', 'error');
     }
   }, []);
-
-  useEffect(() => {
-    generateRSAKeys();
-  }, [generateRSAKeys]);
 
   const exportKey = async (key, type) => {
     const exported = await window.crypto.subtle.exportKey(
@@ -119,6 +165,15 @@ const ChatApp = () => {
       websocket.current.onopen = () => {
         setConnected(true);
         showNotification('Connected to server!', 'success');
+        
+        // If we're already logged in (from saved state), re-authenticate
+        if (currentUser && publicKey) {
+          sendMessage('login', {
+            username: currentUser,
+            password: 'reconnect', // You might want to save password or use token-based auth
+            public_key: publicKey
+          });
+        }
       };
 
       websocket.current.onmessage = (event) => {
@@ -128,8 +183,16 @@ const ChatApp = () => {
 
       websocket.current.onclose = () => {
         setConnected(false);
-        setLoggedIn(false);
         showNotification('Disconnected from server', 'error');
+        
+        // Try to reconnect after 3 seconds if we were logged in
+        if (currentUser) {
+          setTimeout(() => {
+            if (!connected) {
+              connectToServer();
+            }
+          }, 3000);
+        }
       };
 
       websocket.current.onerror = (error) => {
@@ -153,13 +216,24 @@ const ChatApp = () => {
       decryptAndDisplayMessage(data);
     } else if (data.action === 'login_success') {
       setLoggedIn(true);
-      setCurrentUser(username);
+      setCurrentUser(username || currentUser); // Use current username or saved one
       showNotification(data.message, 'success');
       loadFriends();
     } else if (data.status === 'success') {
-      if (data.friends) setFriends(data.friends);
-      if (data.public_key) friendPublicKeys.current[data.username] = data.public_key;
-      if (data.message && !data.friends) showNotification(data.message, 'success');
+      if (data.friends) {
+        setFriends(data.friends);
+      }
+      if (data.public_key) {
+        friendPublicKeys.current[data.username] = data.public_key;
+      }
+      if (data.message && !data.friends) {
+        showNotification(data.message, 'success');
+        
+        // If this was an "add friend" success, reload friends list
+        if (data.message.includes('Added') || data.message.includes('friend')) {
+          setTimeout(() => loadFriends(), 500);
+        }
+      }
     } else if (data.status === 'error') {
       showNotification(data.message, 'error');
     }
@@ -208,7 +282,9 @@ const ChatApp = () => {
     });
   };
 
-  const loadFriends = () => sendMessage('get_friends', {});
+  const loadFriends = () => {
+    sendMessage('get_friends', {});
+  };
 
   const addFriend = () => {
     if (!newFriend) {
@@ -283,6 +359,11 @@ const ChatApp = () => {
     setMessages({});
     setFriends([]);
     friendPublicKeys.current = {};
+    
+    // Clear saved data
+    if (window.chatAppData) {
+      delete window.chatAppData;
+    }
   };
 
   useEffect(() => {
@@ -311,9 +392,16 @@ const ChatApp = () => {
               onClick={connectToServer}
               className="w-full bg-gradient-to-r from-blue-500 to-purple-600 text-white py-3 rounded-lg font-semibold hover:from-blue-600 hover:to-purple-700 transition-all"
             >
-              Connect to Server
+              {currentUser ? `Reconnect as ${currentUser}` : 'Connect to Server'}
             </button>
           </div>
+          {currentUser && (
+            <div className="mt-4 p-3 bg-green-500/20 border border-green-400/30 rounded-lg">
+              <p className="text-green-300 text-sm text-center">
+                Saved session found for {currentUser}
+              </p>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -359,6 +447,13 @@ const ChatApp = () => {
               {authMode === 'login' ? 'Need an account? Register' : 'Have an account? Login'}
             </button>
           </div>
+          {currentUser && (
+            <div className="mt-4 p-3 bg-blue-500/20 border border-blue-400/30 rounded-lg">
+              <p className="text-blue-300 text-sm text-center">
+                Previous session: {currentUser}
+              </p>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -389,12 +484,21 @@ const ChatApp = () => {
                   <div className="text-sm text-green-400">Online</div>
                 </div>
               </div>
-              <button
-                onClick={logout}
-                className="p-2 text-gray-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
-              >
-                <LogOut className="w-5 h-5" />
-              </button>
+              <div className="flex space-x-2">
+                <button
+                  onClick={loadFriends}
+                  className="p-2 text-gray-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
+                  title="Refresh friends"
+                >
+                  <Users className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={logout}
+                  className="p-2 text-gray-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
+                >
+                  <LogOut className="w-5 h-5" />
+                </button>
+              </div>
             </div>
           </div>
 

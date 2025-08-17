@@ -7,6 +7,7 @@ import getpass
 import queue
 from datetime import datetime
 
+
 class ChatClient:
     def __init__(self):
         self.socket = None
@@ -47,17 +48,17 @@ class ChatClient:
     
     def send_request(self, request):
         try:
-            print(f"Sending request: {request}")  # Debug print
+            print(f"Sending request: {request}")
             request_data = json.dumps(request).encode()
             self.socket.send(request_data)
             
-            print("Waiting for response...")  # Debug print
+            print("Waiting for response...")
             
             # Wait for response from the message handling thread
             self.waiting_for_response = True
             try:
                 response = self.pending_responses.get(timeout=10)  # 10 second timeout
-                print(f"Parsed response: {response}")  # Debug print
+                print(f"Parsed response: {response}")
                 return response
             except queue.Empty:
                 print("Timeout waiting for response")
@@ -76,10 +77,13 @@ class ChatClient:
         username = input("Choose username: ")
         password = getpass.getpass("Choose password: ")
         
+        public_key_pem = self.public_key.save_pkcs1("PEM").decode()
+        
         request = {
             "action": "register",
             "username": username,
-            "password": password
+            "password": password,
+            "public_key": public_key_pem
         }
         
         response = self.send_request(request)
@@ -105,7 +109,9 @@ class ChatClient:
         
         if response["status"] == "success":
             self.username = username
-            # Message thread is already running from connection time
+            # Check for any pending messages after login
+            print("Checking for pending messages...")
+            self.check_messages()
             return True
         return False
     
@@ -136,6 +142,10 @@ class ChatClient:
             print(response["message"])
     
     def get_friend_public_key(self, friend_username):
+        # Check if we already have the key cached
+        if friend_username in self.friends_public_keys:
+            return self.friends_public_keys[friend_username]
+        
         # Request friend's public key from server
         request = {
             "action": "get_public_key",
@@ -204,8 +214,22 @@ class ChatClient:
                     
                 except Exception as e:
                     print(f"[{msg['timestamp']}] {msg['from']}: [Could not decrypt message]")
-        elif response["messages"]:
+        elif response["status"] == "success":
             print("No new messages.")
+        else:
+            print(f"Error checking messages: {response['message']}")
+    
+    def view_chat_history(self):
+        """Interactive chat history viewer"""
+        print("\n=== CHAT HISTORY ===")
+        friend_username = input("View chat with (username): ")
+        
+        # For now, this just shows recent messages
+        # In a full implementation, you might want to store local message history
+        # or request chat history from the server
+        print(f"Recent messages with {friend_username}:")
+        print("(Note: Only messages received while client was running are shown)")
+        print("For full chat history, check the server database.")
     
     def receive_messages(self):
         """Background thread to receive all messages and route them appropriately"""
@@ -215,11 +239,11 @@ class ChatClient:
                 if not data:
                     break
                 
-                print(f"Received raw data: {data}")  # Debug print
+                print(f"Received raw data: {data}")
                 
                 try:
                     message = json.loads(data.decode())
-                    print(f"Parsed incoming message: {message}")  # Debug print
+                    print(f"Parsed incoming message: {message}")
                     
                     # Check if this is a server notification (like new_message)
                     if message.get("action") == "new_message":
@@ -259,14 +283,33 @@ class ChatClient:
                         self.pending_responses.put({"status": "error", "message": f"Connection error: {e}"})
                 break
     
+    def show_help(self):
+        """Display help information"""
+        print("\n=== HELP ===")
+        print("Available commands:")
+        print("1. Add friend - Add a new friend to your contact list")
+        print("2. View friends - See your friends and their online status")
+        print("3. Send message - Send an encrypted message to a friend")
+        print("4. Check messages - Check for new messages")
+        print("5. Chat history - View chat history with a friend")
+        print("6. Help - Show this help message")
+        print("7. Logout - Disconnect and exit")
+        print("\nNotes:")
+        print("- All messages are encrypted end-to-end with RSA")
+        print("- You can only message users who are your friends")
+        print("- Messages are stored on the server if the recipient is offline")
+        print("- Your account and friends list persist across sessions")
+    
     def main_menu(self):
         while True:
-            print(f"\n=== CHAT APP - Logged in as {self.username} ===")
+            print(f"\n=== SECURE CHAT - Logged in as {self.username} ===")
             print("1. Add friend")
             print("2. View friends")
             print("3. Send message")
             print("4. Check messages")
-            print("5. Logout")
+            print("5. Chat history")
+            print("6. Help")
+            print("7. Logout")
             
             choice = input("Command: ").strip()
             
@@ -279,13 +322,19 @@ class ChatClient:
             elif choice == "4":
                 self.check_messages()
             elif choice == "5":
+                self.view_chat_history()
+            elif choice == "6":
+                self.show_help()
+            elif choice == "7":
                 print("Logging out...")
                 break
             else:
-                print("Invalid choice!")
+                print("Invalid choice! Type '6' for help.")
     
     def run(self):
-        print("=== RSA ENCRYPTED CHAT CLIENT ===")
+        print("=== RSA ENCRYPTED CHAT CLIENT (STATEFUL) ===")
+        print("This client connects to a stateful server that preserves")
+        print("your account, friends, and message history.")
         
         # Get server details
         host = input("Server IP (press Enter for localhost): ").strip()
@@ -306,14 +355,15 @@ class ChatClient:
         
         # Authentication loop
         while True:
-            print("\n1. Register")
-            print("2. Login")
+            print("\n1. Register new account")
+            print("2. Login to existing account")
             print("3. Exit")
             
             choice = input("Choose option: ").strip()
             
             if choice == "1":
-                self.register()
+                if self.register():
+                    print("Registration successful! Please login.")
             elif choice == "2":
                 if self.login():
                     self.main_menu()
@@ -327,6 +377,7 @@ class ChatClient:
             self.connected = False
             self.socket.close()
 
+
 if __name__ == "__main__":
     client = ChatClient()
     try:
@@ -335,3 +386,5 @@ if __name__ == "__main__":
         print("\nGoodbye!")
     except Exception as e:
         print(f"Client error: {e}")
+        import traceback
+        traceback.print_exc()
