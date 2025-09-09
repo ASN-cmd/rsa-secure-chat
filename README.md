@@ -3,6 +3,11 @@
 A real-time chat application with **end-to-end encryption** using **RSA** in the browser.  
 Built with **React**, **WebSockets**, and **Python** to ensure messages remain private between sender and receiver.
 
+<img width="1918" height="967" alt="image" src="https://github.com/user-attachments/assets/fc9bd3d8-90a2-4c65-ae49-d7fdd520cb3f" />
+<img width="1918" height="958" alt="image" src="https://github.com/user-attachments/assets/7affd34a-e382-4b2c-a777-b3bd95382b84" />
+
+
+
 ---
 
 ## ✨ Features
