@@ -56,6 +56,7 @@ const ChatApp = () => {
       // Generate new keys if we don't have them
       generateRSAKeys();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Save data to memory whenever important state changes
@@ -72,6 +73,27 @@ const ChatApp = () => {
       friendPublicKeys: friendPublicKeys.current
     };
   }, [serverUrl, currentUser, publicKey, privateKeyPem, friends, messages]);
+
+  // Helpers wrapped in useCallback to satisfy hook dependency checks
+  const arrayBufferToBase64 = useCallback((buffer) => {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return window.btoa(binary);
+  }, []);
+
+  const exportKey = useCallback(async (key, type) => {
+    const exported = await window.crypto.subtle.exportKey(
+      type === 'public' ? 'spki' : 'pkcs8',
+      key
+    );
+    const exportedAsString = arrayBufferToBase64(exported);
+    const pemType = type === 'public' ? 'PUBLIC KEY' : 'PRIVATE KEY';
+    return `-----BEGIN ${pemType}-----\n${exportedAsString}\n-----END ${pemType}-----`;
+  }, [arrayBufferToBase64]);
 
   // Generate RSA keys on mount
   const generateRSAKeys = useCallback(async () => {
@@ -98,27 +120,7 @@ const ChatApp = () => {
       console.error('Error generating keys:', error);
       showNotification('Failed to generate RSA keys', 'error');
     }
-  }, []);
-
-  const exportKey = async (key, type) => {
-    const exported = await window.crypto.subtle.exportKey(
-      type === 'public' ? 'spki' : 'pkcs8',
-      key
-    );
-    const exportedAsString = arrayBufferToBase64(exported);
-    const pemType = type === 'public' ? 'PUBLIC KEY' : 'PRIVATE KEY';
-    return `-----BEGIN ${pemType}-----\n${exportedAsString}\n-----END ${pemType}-----`;
-  };
-
-  const arrayBufferToBase64 = (buffer) => {
-    let binary = '';
-    const bytes = new Uint8Array(buffer);
-    const len = bytes.byteLength;
-    for (let i = 0; i < len; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    return window.btoa(binary);
-  };
+  }, [exportKey]);
 
   const base64ToArrayBuffer = (base64) => {
     const binary = window.atob(base64);
