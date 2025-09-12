@@ -30,9 +30,8 @@ ENV FLASK_APP=server.py
 ENV FLASK_ENV=production
 ENV PYTHONUNBUFFERED=1
 
-# WebSocket/HTTP ports (Render requires $PORT)
-EXPOSE $PORT
-EXPOSE 8765  # WebSocket port (must match your code)
+# WebSocket/HTTP port
+EXPOSE 8765
 
 # Health check endpoint
 HEALTHCHECK --interval=30s --timeout=3s \
