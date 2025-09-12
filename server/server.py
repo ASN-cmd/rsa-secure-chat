@@ -1,3 +1,4 @@
+import argparse
 import sqlite3
 import json
 import hashlib
@@ -9,16 +10,28 @@ import threading
 import rsa
 import asyncio
 import websockets
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
+import traceback
 
 # Global reference to server instance for WebSocket handler
 server_instance = None
 
 async def websocket_handler(websocket, path=None):
-    """Global WebSocket handler function"""
+    """Robust WebSocket handler with error handling"""
+    print(f"New connection from {websocket.remote_address}")
     if server_instance:
-        await server_instance.handle_websocket_client(websocket, path or "/")
-
+        try:
+            await server_instance.handle_websocket_client(websocket, path)
+        except websockets.exceptions.ConnectionClosed as e:
+            print(f"Client disconnected: {e.code} {e.reason}")
+        except Exception as e:
+            print(f"WebSocket error: {str(e)}")
+            traceback.print_exc()
+            try:
+                await websocket.close(code=1011, reason=str(e))
+            except:
+                pass
 
 class DatabaseManager:
     def __init__(self, db_path="chat_server.db"):
@@ -345,35 +358,39 @@ class ChatServer:
         self.host = host
         self.port = port
         self.websocket_port = websocket_port
+        
+        # Initialize TCP socket server
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
-        # Initialize database manager
-        self.db = DatabaseManager(db_path)
-        
-        # Store currently connected clients: {username: {socket/websocket, public_key, last_seen, connection_type}}
+        # Client management
         self.clients = {}
         self.client_lock = threading.Lock()
         
-        # Load and display database stats
         stats = self.db.get_user_stats()
-        print(f"Database loaded: {stats['users']} users, {stats['friendships']} friendships, {stats['messages']} messages")
-        print(f"Chat server starting on {host}:{port}")
-        print(f"WebSocket server will start on {host}:{websocket_port}")
+        print(f"Server starting on:\n"
+              f"- HTTP: {host}:{port}\n"
+              f"- WebSocket: {host}:{websocket_port}\n"
+              f"- Health: {host}:5000\n"
+              f"Database stats: {stats['users']} users, {stats['messages']} messages")
 
     def start_health_check(self, port=5000):
-        from http.server import BaseHTTPRequestHandler, HTTPServer
-        import threading
-
+        """Enhanced health check server"""
         class HealthHandler(BaseHTTPRequestHandler):
             def do_GET(self):
                 if self.path == '/health':
                     self.send_response(200)
+                    self.send_header('Content-type', 'text/plain')
+                    self.send_header('Access-Control-Allow-Origin', '*')
                     self.end_headers()
                     self.wfile.write(b'OK')
                 else:
                     self.send_response(404)
                     self.end_headers()
+            
+            def log_message(self, format, *args):
+                # Suppress health check logs
+                return
         
         def run_server():
             try:
@@ -381,52 +398,74 @@ class ChatServer:
                 print(f"Health check server running on port {port}")
                 server.serve_forever()
             except Exception as e:
-                print(f"Health check server failed: {e}")
+                print(f"Health check server error: {e}")
 
-        # Start in a daemon thread
         health_thread = threading.Thread(target=run_server, daemon=True)
         health_thread.start()
-    
+
     def start(self):
-        # Start traditional socket server in a thread
-        socket_thread = threading.Thread(target=self.start_socket_server)
-        socket_thread.daemon = True
+        """Start all server components"""
+        global server_instance
+        server_instance = self
+        
+        # Start health check
+        self.start_health_check()
+        
+        # Start TCP socket server in background thread
+        socket_thread = threading.Thread(target=self.start_socket_server, daemon=True)
         socket_thread.start()
         
-        # Start WebSocket server in the main thread
+        # Start WebSocket server in main thread
         try:
             asyncio.run(self.start_websocket_server())
         except KeyboardInterrupt:
-            print("Server shutting down...")
+            print("\nServer shutting down...")
+        except Exception as e:
+            print(f"Server error: {e}")
+            traceback.print_exc()
     
     def start_socket_server(self):
-        self.server.bind((self.host, self.port))
-        self.server.listen(5)
-        print("Socket server is listening for connections...")
-        
-        while True:
-            try:
-                client_socket, address = self.server.accept()
-                print(f"New socket connection from {address}")
-                
-                client_thread = threading.Thread(
-                    target=self.handle_socket_client, 
-                    args=(client_socket, address)
-                )
-                client_thread.daemon = True
-                client_thread.start()
-                
-            except Exception as e:
-                print(f"Error accepting socket connection: {e}")
+        try:
+            self.server.bind((self.host, self.port))
+            self.server.listen(5)
+            print("Socket server is listening for connections...")
+            
+            while True:
+                try:
+                    client_socket, address = self.server.accept()
+                    print(f"New socket connection from {address}")
+                    
+                    client_thread = threading.Thread(
+                        target=self.handle_socket_client, 
+                        args=(client_socket, address)
+                    )
+                    client_thread.daemon = True
+                    client_thread.start()
+                    
+                except Exception as e:
+                    print(f"Error accepting socket connection: {e}")
+        except Exception as e:
+            print(f"Socket server error: {e}")
+            traceback.print_exc()
     
     async def start_websocket_server(self):
-        print(f"WebSocket server starting on {self.host}:{self.websocket_port}")
-        server = await websockets.serve(
-            websocket_handler,
-            "0.0.0.0",  
-            self.websocket_port
-        )
-        await server.wait_closed()
+        print(f"Starting WebSocket server on {self.host}:{self.websocket_port}")
+        
+        try:
+            server = await websockets.serve(
+                websocket_handler,
+                self.host,
+                self.websocket_port,
+                ping_interval=30,
+                ping_timeout=10,
+                max_size=2**20,  # 1MB max message
+                origins=None  # Allow all origins (lock this down in production)
+            )
+            print("WebSocket server started successfully")
+            await server.wait_closed()
+        except Exception as e:
+            print(f"WebSocket server error: {e}")
+            traceback.print_exc()
     
     async def handle_websocket_client(self, websocket, path):
         username = None
@@ -434,34 +473,56 @@ class ChatServer:
         print(f"New WebSocket connection from {address} (path: {path})")
         
         try:
+            # Send welcome message
+            welcome = {"action": "welcome", "message": "Connected to RSA Chat Server"}
+            await websocket.send(json.dumps(welcome))
+            print(f"Sent welcome message to {address}")
+            
             async for message in websocket:
                 try:
+                    print(f"Received raw message: {message}")
                     data = json.loads(message)
-                    print(f"WebSocket received: {data}")
+                    print(f"WebSocket received from {address}: {data}")
                     
                     response = await self.process_websocket_message(data, websocket, username)
                     
+                    # Update username after successful login
                     if response.get('action') == 'login_success':
                         username = data['username']
-                    print("Sending to client:", response)
+                        print(f"User {username} logged in via WebSocket from {address}")
+                        # Store the username in the client info
+                        with self.client_lock:
+                            if username in self.clients:
+                                self.clients[username]['username'] = username
+                    
+                    print(f"Sending response to {address} (user: {username}):", response)
                     await websocket.send(json.dumps(response))
                     
                 except json.JSONDecodeError as e:
-                    print(f"WebSocket JSON decode error: {e}")
+                    print(f"WebSocket JSON decode error from {address}: {e}")
                     error_response = {"status": "error", "message": "Invalid message format"}
-                    await websocket.send(json.dumps(error_response))
+                    try:
+                        await websocket.send(json.dumps(error_response))
+                    except:
+                        break
                 except Exception as e:
-                    print(f"Error processing WebSocket message: {e}")
+                    print(f"Error processing WebSocket message from {address}: {e}")
+                    traceback.print_exc()
                     error_response = {"status": "error", "message": f"Server error: {str(e)}"}
-                    await websocket.send(json.dumps(error_response))
+                    try:
+                        await websocket.send(json.dumps(error_response))
+                    except:
+                        break
                     
-        except websockets.exceptions.ConnectionClosed:
-            print(f"WebSocket client {address} disconnected")
+        except websockets.exceptions.ConnectionClosed as e:
+            print(f"WebSocket client {address} (user: {username}) disconnected normally: {e.code} {e.reason}")
         except Exception as e:
-            print(f"Error handling WebSocket client {address}: {e}")
+            print(f"Error handling WebSocket client {address} (user: {username}): {e}")
+            traceback.print_exc()
         finally:
             if username:
                 self.disconnect_user(username)
+                print(f"Cleaned up user {username} from {address}")
     
     def handle_socket_client(self, client_socket, address):
         username = None
@@ -500,7 +561,10 @@ class ChatServer:
     async def process_websocket_message(self, message, websocket, current_username):
         action = message.get('action')
         
-        if action == 'register':
+        if action == 'ping':
+            return {"action": "pong", "status": "success"}
+        
+        elif action == 'register':
             success, msg = self.db.create_user(
                 message['username'],
                 message['password'],
@@ -517,10 +581,14 @@ class ChatServer:
             )
         
         elif action == 'add_friend':
+            if not current_username:
+                return {"status": "error", "message": "Not authenticated"}
             success, msg = self.db.add_friendship(current_username, message['friend_username'])
             return {"status": "success" if success else "error", "message": msg}
         
         elif action == 'get_friends':
+            if not current_username:
+                return {"status": "error", "message": "Not authenticated"}
             friends = self.db.get_user_friends(current_username)
             # Add online status
             online_friends = []
@@ -542,6 +610,8 @@ class ChatServer:
                 return {"status": "error", "message": "User not found or no public key"}
         
         elif action == 'send_message':
+            if not current_username:
+                return {"status": "error", "message": "Not authenticated"}
             return await self.send_websocket_message(
                 current_username, 
                 message['to_user'], 
@@ -549,11 +619,13 @@ class ChatServer:
             )
         
         elif action == 'get_messages':
+            if not current_username:
+                return {"status": "error", "message": "Not authenticated"}
             messages = self.db.get_pending_messages(current_username)
             return {"status": "success", "messages": messages}
         
         else:
-            return {"status": "error", "message": "Unknown action"}
+            return {"status": "error", "message": f"Unknown action: {action}"}
     
     def process_message(self, message, client_socket, current_username):
         action = message.get('action')
@@ -561,7 +633,8 @@ class ChatServer:
         if action == 'register':
             success, msg = self.db.create_user(
                 message['username'], 
-                message['password']
+                message['password'],
+                message.get('public_key')
             )
             return {"status": "success" if success else "error", "message": msg}
         
@@ -645,33 +718,45 @@ class ChatServer:
                 "message": f"Welcome back {username}!"}
     
     async def login_websocket_user(self, username, password, public_key_pem, websocket):
+        print(f"Attempting login for user: {username}")
         success, user_data = self.db.authenticate_user(username, password)
         
         if not success:
+            print(f"Authentication failed for user: {username}")
             return {"status": "error", "message": "Invalid username or password"}
         
         try:
-            # Parse the RSA public key
-            try:
-                public_key = rsa.PublicKey.load_pkcs1(public_key_pem.encode())
-            except ValueError:
-                crypto_key = CryptoRSA.import_key(public_key_pem.encode())
-                public_key = rsa.PublicKey(crypto_key.n, crypto_key.e)
+            # Parse the RSA public key (only if provided)
+            if public_key_pem:
+                try:
+                    public_key = rsa.PublicKey.load_pkcs1(public_key_pem.encode())
+                except ValueError:
+                    crypto_key = CryptoRSA.import_key(public_key_pem.encode())
+                    public_key = rsa.PublicKey(crypto_key.n, crypto_key.e)
+                
+                # Update public key in database if different
+                if user_data['public_key'] != public_key_pem:
+                    self.db.update_user_public_key(username, public_key_pem)
+            else:
+                public_key = None
         except Exception as e:
+            print(f"Invalid public key for user {username}: {e}")
             return {"status": "error", "message": f"Invalid public key: {str(e)}"}
-        
-        # Update public key in database if different
-        if user_data['public_key'] != public_key_pem:
-            self.db.update_user_public_key(username, public_key_pem)
         
         # Add to connected clients
         with self.client_lock:
+            # Remove any existing connection for this user
+            if username in self.clients:
+                print(f"User {username} already connected, replacing connection")
+            
             self.clients[username] = {
                 "websocket": websocket,
                 "public_key": public_key,
                 "last_seen": datetime.now(),
-                "connection_type": "websocket"
+                "connection_type": "websocket",
+                "username": username  # Store username for easy access
             }
+            print(f"User {username} added to connected clients. Total clients: {len(self.clients)}")
         
         return {"action": "login_success", "status": "success", 
                 "message": f"Welcome back {username}!"}
@@ -713,12 +798,23 @@ class ChatServer:
             return {"status": "error", "message": msg}
     
     async def send_websocket_message(self, from_user, to_user, encrypted_message):
+        print(f"Attempting to send message from {from_user} to {to_user}")
+        
         # Check if users are friends
         if not self.db.is_friend(from_user, to_user):
+            print(f"Users {from_user} and {to_user} are not friends")
             return {"status": "error", "message": "You can only message friends"}
         
+        # Store message first
+        success, msg = self.db.store_message(from_user, to_user, encrypted_message)
+        if not success:
+            print(f"Failed to store message: {msg}")
+            return {"status": "error", "message": msg}
+        
         # Try to deliver immediately if user is online
+        message_delivered = False
         with self.client_lock:
+            print(f"Current online users: {list(self.clients.keys())}")
             if to_user in self.clients:
                 try:
                     notification = {
@@ -729,61 +825,56 @@ class ChatServer:
                     }
                     
                     client_info = self.clients[to_user]
+                    print(f"Delivering message to {to_user} via {client_info['connection_type']}")
+                    
                     if client_info["connection_type"] == "socket":
                         client_info["socket"].send(json.dumps(notification).encode())
+                        print(f"Message sent to {to_user} via socket")
                     else:  # websocket
                         await client_info["websocket"].send(json.dumps(notification))
+                        print(f"Message sent to {to_user} via websocket")
                     
-                    # Still store the message for history
-                    self.db.store_message(from_user, to_user, encrypted_message)
-                    return {"status": "success", "message": "Message delivered"}
+                    message_delivered = True
                     
                 except Exception as e:
-                    print(f"Failed to deliver message immediately: {e}")
+                    print(f"Failed to deliver message immediately to {to_user}: {e}")
+                    traceback.print_exc()
+            else:
+                print(f"User {to_user} is not online")
         
-        # Store message for later delivery
-        success, msg = self.db.store_message(from_user, to_user, encrypted_message)
-        if success:
-            return {"status": "success", "message": "Message stored for delivery"}
+        if message_delivered:
+            return {"status": "success", "message": f"Message delivered to {to_user}"}
         else:
-            return {"status": "error", "message": msg}
+            return {"status": "success", "message": f"Message stored for {to_user} (user offline)"}
     
     def disconnect_user(self, username):
         with self.client_lock:
             if username in self.clients:
+                print(f"Disconnecting user: {username}")
                 del self.clients[username]
-        print(f"User {username} disconnected")
+                print(f"User {username} disconnected. Remaining clients: {len(self.clients)}")
+            else:
+                print(f"Attempted to disconnect user {username} but not found in clients list")
 
 
 if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='RSA Chat Server with Persistent Storage')
+    parser = argparse.ArgumentParser(description='RSA Chat Server')
     parser.add_argument('--host', default='0.0.0.0', help='Host to bind to')
-    parser.add_argument('--port', type=int, default=9999, help='Socket server port')
-    parser.add_argument('--ws-port', type=int, default=8765, help='WebSocket server port')
-    parser.add_argument('--health-port', type=int, default=5000, help='Health check port')
-    parser.add_argument('--db', default='chat_server.db', help='Database file path')
+    parser.add_argument('--port', type=int, default=9999, help='TCP server port')
+    parser.add_argument('--ws-port', type=int, default=8765, help='WebSocket port')
+    parser.add_argument('--db', default='chat_server.db', help='Database path')
     
     args = parser.parse_args()
     
-    server = ChatServer(
-        host=args.host,
-        port=args.port,
-        websocket_port=args.ws_port,
-        db_path=args.db
-    )
-    
-    # Start health check server
-    server.start_health_check(args.health_port)
-    
     try:
-        print(f"Starting stateful chat server...")
-        print(f"Database: {args.db}")
+        server = ChatServer(
+            host=args.host,
+            port=args.port,
+            websocket_port=args.ws_port,
+            db_path=args.db
+        )
         server.start()
-    except KeyboardInterrupt:
-        print("\nServer shutting down...")
     except Exception as e:
-        print(f"Server error: {e}")
+        print(f"Failed to start server: {e}")
         import traceback
         traceback.print_exc()
